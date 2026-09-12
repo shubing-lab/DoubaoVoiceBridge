@@ -76,54 +76,58 @@ final class UURemoteDelivery {
             "Transcript staged for UU lengthBucket=\(lengthBucket, privacy: .public) pasteboardGeneration=\(bridgeChangeCount, privacy: .private)"
         )
         let configuredDelay = UserDefaults.standard.double(forKey: "pasteDelay")
-        let syncDelay = min(
-            max(configuredDelay, Self.minimumPasteDelay),
-            Self.maximumPasteDelay
-        )
-
-        // Activate UU immediately so its clipboard bridge has the full delay
-        // to synchronize before the paste shortcut is sent.
+        let syncDelay = min(max(configuredDelay, Self.minimumPasteDelay), Self.maximumPasteDelay)
         panelWillHide()
+        let startedAt = Date()
         target.activateOriginalWindow()
-        logger.notice("Original UU window activation requested; waiting for clipboard synchronization")
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + syncDelay) { [weak self] in
-            guard let self else { return }
-            guard !target.isTerminated else {
-                completion(.failure(DeliveryError.targetAppMissing))
-                cleanupCompletion()
-                return
-            }
+        logger.notice("Original UU window activation requested; polling focus before paste")
+        var didFinish = false
+        var didLogRetry = false
+        func finish(_ result: Result<Void, Error>) {
+            guard !didFinish else { return }
+            didFinish = true
+            completion(result)
+            cleanupCompletion()
+        }
+        func checkFocus() {
+            guard !didFinish else { return }
+            guard !target.isTerminated else { finish(.failure(DeliveryError.targetAppMissing)); return }
             let clipboardGenerationMatches = self.pasteboard.changeCount == bridgeChangeCount
             let clipboardStringMatches = self.pasteboard.string(forType: .string) == text
-            let frontmostApplication = NSWorkspace.shared.frontmostApplication
-            let frontmostPIDMatches = frontmostApplication?.processIdentifier == target.processIdentifier
-            let focusedWindowMatches = target.stillMatchesFocusedWindow()
-            self.logger.notice(
-                "UU delivery eligibility clipboardGenerationMatches=\(clipboardGenerationMatches, privacy: .public) clipboardStringMatches=\(clipboardStringMatches, privacy: .public) frontmostBundle=\(frontmostApplication?.bundleIdentifier ?? "unknown", privacy: .public) frontmostPIDMatches=\(frontmostPIDMatches, privacy: .public) stillMatchesFocusedWindow=\(focusedWindowMatches, privacy: .public)"
-            )
-            if let error = DeliveryEligibilityPolicy.failure(
-                clipboardStringMatches: clipboardStringMatches,
-                frontmostPIDMatches: frontmostPIDMatches,
-                focusedWindowMatches: focusedWindowMatches
-            ) {
-                completion(.failure(error))
-                cleanupCompletion()
-                return
+            guard clipboardStringMatches else {
+                self.logger.notice("UU delivery clipboard changed generationMatches=\(clipboardGenerationMatches, privacy: .public) stringMatches=false")
+                finish(.failure(DeliveryError.clipboardChanged)); return
             }
-
-            ClipboardKeyboardPaster.postCommandV { result in
-                switch result {
-                case .success:
-                    self.logger.notice("Complete Command-V key sequence posted to UU")
-                    completion(.success(()))
-                    cleanupCompletion()
-                case .failure(let error):
-                    completion(.failure(error))
-                    cleanupCompletion()
+            guard target.stillMatchesFocusedWindow() else {
+                finish(.failure(DeliveryError.targetChanged)); return
+            }
+            let frontmost = NSWorkspace.shared.frontmostApplication
+            let decision = DeliveryFocusPolicy.decision(
+                frontmostPID: frontmost?.processIdentifier,
+                targetPID: target.processIdentifier,
+                bridgePID: ProcessInfo.processInfo.processIdentifier,
+                elapsed: Date().timeIntervalSince(startedAt),
+                retryDeadline: syncDelay + 2.0
+            )
+            switch decision {
+            case .ready:
+                self.logger.notice("UU delivery focus ready bundle=\(frontmost?.bundleIdentifier ?? "unknown", privacy: .public)")
+                ClipboardKeyboardPaster.postCommandV { result in
+                    switch result {
+                    case .success: self.logger.notice("Complete Command-V key sequence posted to UU"); finish(.success(()))
+                    case .failure(let error): finish(.failure(error))
+                    }
                 }
+            case .retryActivation:
+                if !didLogRetry { self.logger.notice("UU focus is bridge or unavailable; retrying activation"); didLogRetry = true }
+                target.activateOriginalWindow()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: checkFocus)
+            case .targetChanged:
+                self.logger.notice("UU delivery focus changed before timeout")
+                finish(.failure(DeliveryError.targetChanged))
             }
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + syncDelay, execute: checkFocus)
     }
 
 }
@@ -137,6 +141,16 @@ enum DeliveryEligibilityPolicy {
         guard clipboardStringMatches else { return .clipboardChanged }
         guard frontmostPIDMatches, focusedWindowMatches else { return .targetChanged }
         return nil
+    }
+}
+
+enum DeliveryFocusDecision: Equatable { case ready, retryActivation, targetChanged }
+
+enum DeliveryFocusPolicy {
+    static func decision(frontmostPID: pid_t?, targetPID: pid_t, bridgePID: pid_t, elapsed: TimeInterval, retryDeadline: TimeInterval = 2.0) -> DeliveryFocusDecision {
+        if frontmostPID == targetPID { return .ready }
+        if elapsed < retryDeadline && (frontmostPID == nil || frontmostPID == bridgePID) { return .retryActivation }
+        return .targetChanged
     }
 }
 

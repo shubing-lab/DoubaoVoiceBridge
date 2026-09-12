@@ -13,6 +13,18 @@ enum SelfTests {
         }
 
         do {
+            check(DeliveryFocusPolicy.decision(frontmostPID: 100, targetPID: 100, bridgePID: 200, elapsed: 0.1), .ready, "target frontmost is ready")
+            check(DeliveryFocusPolicy.decision(frontmostPID: 200, targetPID: 100, bridgePID: 200, elapsed: 0.5), .retryActivation, "bridge frontmost retries activation")
+            check(DeliveryFocusPolicy.decision(frontmostPID: nil, targetPID: 100, bridgePID: 200, elapsed: 0.5), .retryActivation, "unknown frontmost retries activation")
+            check(DeliveryFocusPolicy.decision(frontmostPID: 300, targetPID: 100, bridgePID: 200, elapsed: 0.5), .targetChanged, "third party frontmost fails")
+            check(DeliveryFocusPolicy.decision(frontmostPID: 200, targetPID: 100, bridgePID: 200, elapsed: 2.0), .targetChanged, "bridge frontmost hard timeout fails")
+            check(DeliveryFocusPolicy.decision(frontmostPID: 200, targetPID: 100, bridgePID: 200, elapsed: 3.0, retryDeadline: 5.0), .retryActivation, "three second sync delay preserves retry window")
+            check(DeliveryFocusPolicy.decision(frontmostPID: 200, targetPID: 100, bridgePID: 200, elapsed: 5.0, retryDeadline: 5.0), .targetChanged, "sync delay plus two seconds expires retry")
+            check(DeliveryEligibilityPolicy.failure(clipboardStringMatches: false, frontmostPIDMatches: true, focusedWindowMatches: true), .clipboardChanged, "changed clipboard fails")
+            check(DeliveryEligibilityPolicy.failure(clipboardStringMatches: true, frontmostPIDMatches: true, focusedWindowMatches: false), .targetChanged, "changed AX window fails")
+        }
+
+        do {
             check(
                 DictationTrigger.rightOptionToggle.keyCode,
                 61,
