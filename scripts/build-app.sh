@@ -4,19 +4,22 @@ set -euo pipefail
 project_root="${0:A:h:h}"
 cd "$project_root"
 
-swift build -c release --arch x86_64 -j 2
-swift build -c release --arch arm64 -j 2
+build_root="$(mktemp -d "${TMPDIR:-/tmp}/doubao-voice-build.XXXXXX")"
+trap 'rm -rf "$build_root"' EXIT
 
-stage_root="$(mktemp -d "${TMPDIR:-/tmp}/doubao-voice-bridge.XXXXXX")"
-trap 'rm -rf "$stage_root"' EXIT
+# SwiftPM's current unified output directory can overwrite the first
+# architecture. Keep the two release products in separate scratch paths so
+# lipo always receives both slices.
+swift build -c release --arch x86_64 -j 2 --scratch-path "$build_root/x86_64"
+swift build -c release --arch arm64 -j 2 --scratch-path "$build_root/arm64"
 
-stage_app="$stage_root/远控听写.app"
+stage_app="$build_root/远控听写.app"
 mkdir -p "$stage_app/Contents/MacOS" "$stage_app/Contents/Resources"
 cp "$project_root/Resources/Info.plist" "$stage_app/Contents/Info.plist"
 
 lipo -create \
-    "$project_root/.build/x86_64-apple-macosx/release/DoubaoVoiceBridge" \
-    "$project_root/.build/arm64-apple-macosx/release/DoubaoVoiceBridge" \
+    "$build_root/x86_64/out/Products/Release/DoubaoVoiceBridge" \
+    "$build_root/arm64/out/Products/Release/DoubaoVoiceBridge" \
     -output "$stage_app/Contents/MacOS/DoubaoVoiceBridge"
 chmod 755 "$stage_app/Contents/MacOS/DoubaoVoiceBridge"
 

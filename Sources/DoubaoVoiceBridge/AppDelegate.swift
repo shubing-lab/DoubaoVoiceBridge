@@ -31,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let latencyDefaultsMigrationKey = "didMigrateLatencyDefaultsV23"
 
     private let logger = Logger(subsystem: "com.lyp.DoubaoVoiceBridge", category: "app")
+    private let manualComposerRequested: Bool
     private let coordinator = SessionCoordinator()
     private var monitor: ControlHoldMonitor?
     private var statusItem: NSStatusItem?
@@ -44,10 +45,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var tapOrderAuditTimer: Timer?
     private var tapReinstallTimes: [Date] = []
 
+    init(manualComposerRequested: Bool = false) {
+        self.manualComposerRequested = manualComposerRequested
+        super.init()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.register(defaults: [
             "pasteDelay": UURemoteDelivery.defaultPasteDelay,
-            "restoreClipboard": true,
             "autoPasteUU": true,
             "controlHoldThreshold": 0.18
         ])
@@ -68,7 +73,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             localComposerReady: { [weak self] in
                 self?.coordinator.isLocalComposerReady ?? false
             },
-            onBegin: { [weak self] target in self?.coordinator.begin(target: target) },
+            onBegin: { [weak self] target, trigger in
+                self?.coordinator.begin(target: target, trigger: trigger)
+            },
             onRelease: { [weak self] in self?.coordinator.controlReleased() },
             onCancel: { [weak self] in self?.coordinator.cancel() }
         )
@@ -76,6 +83,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeUURemoteLifecycle()
         observeEventTapChanges()
         startMonitorOrRequestPermissions(promptIfNeeded: true)
+        if manualComposerRequested {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.openComposerManually()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -134,7 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menu.addItem(status)
 
-        let instruction = NSMenuItem(title: "按住左 ⌃ 说话，松开自动上屏", action: nil, keyEquivalent: "")
+        let instruction = NSMenuItem(title: "UU 中：长按左 ⌃，或按右 ⌥ 开始/结束听写", action: nil, keyEquivalent: "")
         instruction.isEnabled = false
         menu.addItem(instruction)
         menu.addItem(.separator())
@@ -155,17 +167,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func currentUURemoteTarget() -> UURemoteTarget? {
-        guard let frontmost = NSWorkspace.shared.frontmostApplication,
-              frontmost.bundleIdentifier == Self.uuRemoteBundleIdentifier,
-              !frontmost.isTerminated else {
+        let workspace = NSWorkspace.shared
+        guard let uuRemote = workspace.runningApplications.first(where: {
+            $0.bundleIdentifier == Self.uuRemoteBundleIdentifier && !$0.isTerminated
+        }) else {
             return nil
         }
-        return UURemoteTarget(application: frontmost)
+
+        // A connected UU remote-control window can be visually frontmost while
+        // macOS briefly reports a window-management process as the frontmost
+        // application. In that case UU still marks its owning application as
+        // active. Accept either signal, but never a merely-running background
+        // UU process, so the Control gesture remains scoped to an active UU
+        // session.
+        let frontmost = workspace.frontmostApplication
+        let isFrontmost = frontmost?.processIdentifier == uuRemote.processIdentifier
+        guard UURemoteForegroundEligibility.allowsTarget(
+            isFrontmost: isFrontmost,
+            uuIsActive: uuRemote.isActive
+        ) else {
+            let frontmostBundle = frontmost?.bundleIdentifier ?? "unknown"
+            logger.notice(
+                "UU target not active; frontmost=\(frontmostBundle, privacy: .public) uuActive=\(uuRemote.isActive, privacy: .public)"
+            )
+            return nil
+        }
+        return UURemoteTarget(application: uuRemote)
     }
 
     @objc private func openComposerManually() {
         guard let target = currentUURemoteTarget() else {
-            setStatus("请先点回 UU 远控，再长按左 ⌃", isError: true)
+            setStatus("请先点回 UU 远控，再按左 ⌃ 或右 ⌥", isError: true)
             return
         }
         target.captureFocusedWindow()
@@ -195,7 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try monitor.start()
             permissionRetryTimer?.invalidate()
             permissionRetryTimer = nil
-            setStatus("就绪 · 在 UU 远控中长按左 ⌃", isError: false)
+            setStatus(SessionCoordinator.readyStatus, isError: false)
         } catch {
             logger.error("Unable to start control monitor: \(error.localizedDescription, privacy: .public)")
             setStatus("需要开启辅助功能与输入监控权限", isError: true)
@@ -306,6 +338,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quitApplication() {
         NSApp.terminate(nil)
+    }
+}
+
+enum UURemoteForegroundEligibility {
+    static func allowsTarget(isFrontmost: Bool, uuIsActive: Bool) -> Bool {
+        isFrontmost || uuIsActive
     }
 }
 

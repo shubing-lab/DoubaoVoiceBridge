@@ -125,7 +125,7 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func begin(targetDescription: String) {
+    func begin(targetDescription: String, instruction: String) {
         sessionID = UUID()
         cancelSettleTimer()
         textView.string = ""
@@ -136,7 +136,7 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         textView.isEditable = true
         lastTextChangeAt = Date()
         targetLabel.stringValue = targetDescription
-        statusLabel.stringValue = "正在启动豆包语音输入法…按住左 ⌃ 说话，松开后自动发送"
+        statusLabel.stringValue = "正在启动豆包语音输入法…\(instruction)"
         statusLabel.textColor = .secondaryLabelColor
 
         guard let window else { return }

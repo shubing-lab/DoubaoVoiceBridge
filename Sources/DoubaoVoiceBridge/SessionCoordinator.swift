@@ -1,6 +1,8 @@
 import AppKit
 
 final class SessionCoordinator {
+    static let readyStatus = "就绪 · UU 中长按左 ⌃ 或按右 ⌥"
+
     enum State: Equatable {
         case idle
         case listening
@@ -32,15 +34,16 @@ final class SessionCoordinator {
         panel.onTranscriptTimeout = { [weak self] in self?.handleTranscriptTimeout() }
     }
 
-    func begin(target: UURemoteTarget) {
+    func begin(target: UURemoteTarget, trigger: DictationTrigger? = nil) {
         guard (state == .idle || state == .failed), !deliveryAwaitingCleanup else {
-            onStatusChange?("正在恢复剪贴板，请稍候…", false)
+            onStatusChange?("上一次发送仍在收尾，请稍候…", false)
             return
         }
         self.target = target
         state = .listening
-        panel.begin(targetDescription: "发送到 Mac mini · UU 远控")
-        onStatusChange?("正在听写…松开左 ⌃ 自动发送", false)
+        let instruction = trigger?.composerInstruction ?? "开始说话，完成后自动发送"
+        panel.begin(targetDescription: "发送到 Mac mini · UU 远控", instruction: instruction)
+        onStatusChange?("正在听写…\(instruction)", false)
     }
 
     func controlReleased() {
@@ -57,12 +60,11 @@ final class SessionCoordinator {
         state = .idle
         panel.hide()
         target?.activateOriginalWindow()
-        onStatusChange?("就绪 · 在 UU 远控中长按左 ⌃", false)
+        onStatusChange?(Self.readyStatus, false)
     }
 
     func prepareForTermination() {
         ClipboardKeyboardPaster.finishPendingEventsBeforeTermination()
-        delivery.restoreClipboardForTermination()
     }
 
     private func send(text: String) {
@@ -96,7 +98,7 @@ final class SessionCoordinator {
                 self.deliveryAwaitingCleanup = false
                 if self.state == .delivering {
                     self.state = .idle
-                    self.onStatusChange?("就绪 · 在 UU 远控中长按左 ⌃", false)
+                    self.onStatusChange?(Self.readyStatus, false)
                 }
             }
         )

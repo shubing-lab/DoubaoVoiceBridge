@@ -1,8 +1,10 @@
 import AppKit
 import ApplicationServices
+import os.log
 
 final class UURemoteTarget {
     let application: NSRunningApplication
+    private let logger = Logger(subsystem: "com.lyp.DoubaoVoiceBridge", category: "target")
     private var focusedWindow: AXUIElement?
 
     init(application: NSRunningApplication) {
@@ -15,7 +17,9 @@ final class UURemoteTarget {
     @discardableResult
     func captureFocusedWindow() -> Bool {
         focusedWindow = Self.copyFocusedWindow(pid: processIdentifier)
-        return focusedWindow != nil
+        let succeeded = focusedWindow != nil
+        logger.notice("Captured UU focused window success=\(succeeded, privacy: .public)")
+        return succeeded
     }
 
     func activateOriginalWindow() {

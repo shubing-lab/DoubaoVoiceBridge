@@ -13,6 +13,35 @@ enum SelfTests {
         }
 
         do {
+            check(
+                DictationTrigger.rightOptionToggle.keyCode,
+                61,
+                "right Option key code"
+            )
+            check(
+                DictationTrigger.rightOptionToggle.modifierFlag,
+                .maskAlternate,
+                "right Option modifier flag"
+            )
+            check(
+                DictationTrigger.rightOptionToggle.composerInstruction.contains("右 ⌥"),
+                true,
+                "right Option instruction"
+            )
+        }
+
+        do {
+            // Models UU 4.39.1 consuming the HID event before the bridge tap:
+            // physical state edges must still produce exactly one transition.
+            var state = PhysicalModifierState()
+            check(state.observe(false), .unchanged, "right Option IOHID initial state")
+            check(state.observe(true), .pressed, "right Option IOHID recovers press")
+            check(state.observe(true), .unchanged, "right Option IOHID de-duplicates press")
+            check(state.observe(false), .released, "right Option IOHID recovers release")
+            check(state.observe(false), .unchanged, "right Option IOHID de-duplicates release")
+        }
+
+        do {
             var state = HoldGestureState()
             check(state.handle(.controlDown(targetAvailable: true)), [.suppress, .scheduleThreshold], "long hold down")
             check(state.phase, .pending, "long hold pending")
@@ -44,6 +73,33 @@ enum SelfTests {
             _ = state.handle(.controlDown(targetAvailable: true))
             check(state.handle(.controlUp), [.suppress], "quick tap")
             check(state.phase, .idle, "quick tap idle")
+        }
+
+        do {
+            check(
+                UURemoteForegroundEligibility.allowsTarget(
+                    isFrontmost: true,
+                    uuIsActive: false
+                ),
+                true,
+                "frontmost UU is eligible"
+            )
+            check(
+                UURemoteForegroundEligibility.allowsTarget(
+                    isFrontmost: false,
+                    uuIsActive: true
+                ),
+                true,
+                "active UU remote window is eligible"
+            )
+            check(
+                UURemoteForegroundEligibility.allowsTarget(
+                    isFrontmost: false,
+                    uuIsActive: false
+                ),
+                false,
+                "background UU remains ineligible"
+            )
         }
 
         do {
@@ -86,9 +142,9 @@ enum SelfTests {
 
         do {
             check(
-                SyntheticControlRoute.localSessionDictation.eventTapLocation.rawValue,
-                CGEventTapLocation.cgSessionEventTap.rawValue,
-                "local dictation bypasses UU HID tap"
+                SyntheticControlRoute.localHIDDictation.eventTapLocation.rawValue,
+                CGEventTapLocation.cghidEventTap.rawValue,
+                "local dictation reaches input method HID taps"
             )
             check(
                 SyntheticControlRoute.remoteHIDPassthrough.eventTapLocation.rawValue,
@@ -144,6 +200,76 @@ enum SelfTests {
             check(PrivacySafeTextMetrics.lengthBucket(16), "5-16", "medium length bucket")
             check(PrivacySafeTextMetrics.lengthBucket(64), "17-64", "long length bucket")
             check(PrivacySafeTextMetrics.lengthBucket(65), "65+", "largest length bucket")
+        }
+
+        do {
+            let name = NSPasteboard.Name("com.lyp.DoubaoVoiceBridge.self-test-\(UUID().uuidString)")
+            let pasteboard = NSPasteboard(name: name)
+            defer { pasteboard.releaseGlobally() }
+            pasteboard.clearContents()
+            _ = pasteboard.setString("same text", forType: .string)
+            let firstGeneration = pasteboard.changeCount
+            pasteboard.clearContents()
+            _ = pasteboard.setString("same text", forType: .string)
+            let secondGeneration = pasteboard.changeCount
+            check(secondGeneration != firstGeneration, true, "same text pasteboard generation changes")
+            check(
+                DeliveryEligibilityPolicy.failure(
+                    clipboardStringMatches: pasteboard.string(forType: .string) == "same text",
+                    frontmostPIDMatches: true,
+                    focusedWindowMatches: true
+                ),
+                nil,
+                "same text survives clipboard generation change"
+            )
+            pasteboard.clearContents()
+            check(
+                DeliveryEligibilityPolicy.failure(
+                    clipboardStringMatches: pasteboard.string(forType: .string) == "same text",
+                    frontmostPIDMatches: true,
+                    focusedWindowMatches: true
+                ),
+                .clipboardChanged,
+                "cleared pasteboard blocks delivery"
+            )
+            _ = pasteboard.setString("different text", forType: .string)
+            check(
+                DeliveryEligibilityPolicy.failure(
+                    clipboardStringMatches: pasteboard.string(forType: .string) == "same text",
+                    frontmostPIDMatches: true,
+                    focusedWindowMatches: true
+                ),
+                .clipboardChanged,
+                "different text blocks delivery"
+            )
+            _ = pasteboard.setString("", forType: .string)
+            check(
+                DeliveryEligibilityPolicy.failure(
+                    clipboardStringMatches: pasteboard.string(forType: .string) == "same text",
+                    frontmostPIDMatches: true,
+                    focusedWindowMatches: true
+                ),
+                .clipboardChanged,
+                "empty string blocks delivery"
+            )
+            check(
+                DeliveryEligibilityPolicy.failure(
+                    clipboardStringMatches: true,
+                    frontmostPIDMatches: false,
+                    focusedWindowMatches: true
+                ),
+                .targetChanged,
+                "target PID mismatch blocks delivery"
+            )
+            check(
+                DeliveryEligibilityPolicy.failure(
+                    clipboardStringMatches: true,
+                    frontmostPIDMatches: true,
+                    focusedWindowMatches: false
+                ),
+                .targetChanged,
+                "focused window mismatch blocks delivery"
+            )
         }
 
         do {
@@ -247,7 +373,7 @@ enum SelfTests {
         }
 
         if failures.isEmpty {
-            print("SELF_TEST_OK tests=10")
+            print("SELF_TEST_OK tests=12")
             return true
         }
         for failure in failures {

@@ -6,8 +6,8 @@ enum DeliveryError: LocalizedError, Equatable {
     case emptyText
     case accessibilityMissing
     case targetAppMissing
-    case clipboardSnapshotUnavailable
     case pasteboardUnavailable
+    case clipboardChanged
     case targetChanged
     case keyboardEventFailed
     case modifierKeysActive
@@ -20,10 +20,10 @@ enum DeliveryError: LocalizedError, Equatable {
             return "尚未开启辅助功能权限"
         case .targetAppMissing:
             return "UU 远控已经关闭"
-        case .clipboardSnapshotUnavailable:
-            return "原剪贴板内容过大或无法安全备份"
         case .pasteboardUnavailable:
             return "无法写入系统剪贴板"
+        case .clipboardChanged:
+            return "剪贴板内容发生变化，已取消自动粘贴"
         case .targetChanged:
             return "发送前焦点发生变化，已取消自动粘贴"
         case .keyboardEventFailed:
@@ -41,9 +41,6 @@ final class UURemoteDelivery {
 
     private let pasteboard = NSPasteboard.general
     private let logger = Logger(subsystem: "com.lyp.DoubaoVoiceBridge", category: "delivery")
-    private var activeSnapshot: PasteboardSnapshot?
-    private var activeBridgeChangeCount: Int?
-    private var shouldRestoreActiveSnapshot = false
 
     func deliver(
         text: String,
@@ -68,23 +65,12 @@ final class UURemoteDelivery {
             return
         }
 
-        let shouldRestore = UserDefaults.standard.bool(forKey: "restoreClipboard")
-        let snapshot = PasteboardSnapshot.capture(from: pasteboard)
-        if shouldRestore && snapshot == nil {
-            completion(.failure(DeliveryError.clipboardSnapshotUnavailable))
-            return
-        }
-
         pasteboard.clearContents()
         guard pasteboard.setString(text, forType: .string) else {
-            snapshot?.restore(to: pasteboard)
             completion(.failure(DeliveryError.pasteboardUnavailable))
             return
         }
         let bridgeChangeCount = pasteboard.changeCount
-        activeSnapshot = snapshot
-        activeBridgeChangeCount = bridgeChangeCount
-        shouldRestoreActiveSnapshot = shouldRestore
         let lengthBucket = PrivacySafeTextMetrics.lengthBucket(text.utf16.count)
         logger.notice(
             "Transcript staged for UU lengthBucket=\(lengthBucket, privacy: .public) pasteboardGeneration=\(bridgeChangeCount, privacy: .private)"
@@ -104,18 +90,24 @@ final class UURemoteDelivery {
         DispatchQueue.main.asyncAfter(deadline: .now() + syncDelay) { [weak self] in
             guard let self else { return }
             guard !target.isTerminated else {
-                self.restoreImmediatelyIfSafe(snapshot, expectedChangeCount: bridgeChangeCount)
-                self.clearActiveDelivery()
                 completion(.failure(DeliveryError.targetAppMissing))
                 cleanupCompletion()
                 return
             }
-            guard self.pasteboard.changeCount == bridgeChangeCount,
-                  NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier,
-                  target.stillMatchesFocusedWindow() else {
-                self.restoreImmediatelyIfSafe(snapshot, expectedChangeCount: bridgeChangeCount)
-                self.clearActiveDelivery()
-                completion(.failure(DeliveryError.targetChanged))
+            let clipboardGenerationMatches = self.pasteboard.changeCount == bridgeChangeCount
+            let clipboardStringMatches = self.pasteboard.string(forType: .string) == text
+            let frontmostApplication = NSWorkspace.shared.frontmostApplication
+            let frontmostPIDMatches = frontmostApplication?.processIdentifier == target.processIdentifier
+            let focusedWindowMatches = target.stillMatchesFocusedWindow()
+            self.logger.notice(
+                "UU delivery eligibility clipboardGenerationMatches=\(clipboardGenerationMatches, privacy: .public) clipboardStringMatches=\(clipboardStringMatches, privacy: .public) frontmostBundle=\(frontmostApplication?.bundleIdentifier ?? "unknown", privacy: .public) frontmostPIDMatches=\(frontmostPIDMatches, privacy: .public) stillMatchesFocusedWindow=\(focusedWindowMatches, privacy: .public)"
+            )
+            if let error = DeliveryEligibilityPolicy.failure(
+                clipboardStringMatches: clipboardStringMatches,
+                frontmostPIDMatches: frontmostPIDMatches,
+                focusedWindowMatches: focusedWindowMatches
+            ) {
+                completion(.failure(error))
                 cleanupCompletion()
                 return
             }
@@ -125,22 +117,8 @@ final class UURemoteDelivery {
                 case .success:
                     self.logger.notice("Complete Command-V key sequence posted to UU")
                     completion(.success(()))
-                    guard shouldRestore, let snapshot else {
-                        self.clearActiveDelivery()
-                        cleanupCompletion()
-                        return
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                        if self.pasteboard.changeCount == bridgeChangeCount {
-                            snapshot.restore(to: self.pasteboard)
-                            self.logger.notice("Original clipboard restored")
-                        }
-                        self.clearActiveDelivery()
-                        cleanupCompletion()
-                    }
+                    cleanupCompletion()
                 case .failure(let error):
-                    self.restoreImmediatelyIfSafe(snapshot, expectedChangeCount: bridgeChangeCount)
-                    self.clearActiveDelivery()
                     completion(.failure(error))
                     cleanupCompletion()
                 }
@@ -148,30 +126,17 @@ final class UURemoteDelivery {
         }
     }
 
-    func restoreClipboardForTermination() {
-        precondition(Thread.isMainThread)
-        guard shouldRestoreActiveSnapshot,
-              let snapshot = activeSnapshot,
-              let changeCount = activeBridgeChangeCount else {
-            clearActiveDelivery()
-            return
-        }
-        restoreImmediatelyIfSafe(snapshot, expectedChangeCount: changeCount)
-        clearActiveDelivery()
-    }
+}
 
-    private func restoreImmediatelyIfSafe(
-        _ snapshot: PasteboardSnapshot?,
-        expectedChangeCount: Int
-    ) {
-        guard let snapshot, pasteboard.changeCount == expectedChangeCount else { return }
-        snapshot.restore(to: pasteboard)
-    }
-
-    private func clearActiveDelivery() {
-        activeSnapshot = nil
-        activeBridgeChangeCount = nil
-        shouldRestoreActiveSnapshot = false
+enum DeliveryEligibilityPolicy {
+    static func failure(
+        clipboardStringMatches: Bool,
+        frontmostPIDMatches: Bool,
+        focusedWindowMatches: Bool
+    ) -> DeliveryError? {
+        guard clipboardStringMatches else { return .clipboardChanged }
+        guard frontmostPIDMatches, focusedWindowMatches else { return .targetChanged }
+        return nil
     }
 }
 

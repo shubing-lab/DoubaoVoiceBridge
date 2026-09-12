@@ -12,7 +12,9 @@ enum DoubaoVoiceBridgeMain {
         }
 
         let application = NSApplication.shared
-        let appDelegate = AppDelegate()
+        let appDelegate = AppDelegate(
+            manualComposerRequested: CommandLine.arguments.contains("--manual-composer")
+        )
         application.delegate = appDelegate
         application.setActivationPolicy(.accessory)
         application.run()
