@@ -58,6 +58,7 @@ enum PhysicalModifierTransition: Equatable {
 
 final class ControlHoldMonitor {
     static let syntheticEventMarker: Int64 = 0x4456_4252
+    private static let rightOptionComposerFocusDelay: TimeInterval = 0.12
     private static let keyboardUsagePage: UInt32 = 0x01
     private static let keyboardUsage: UInt32 = 0x06
     private static let rightOptionUsagePage: UInt32 = 0x07
@@ -394,7 +395,7 @@ final class ControlHoldMonitor {
             logger.notice("Right Option pressed; opening local composer")
             onBegin(target, .rightOptionToggle)
             localFocusDeadline = Date().addingTimeInterval(0.75)
-            scheduleSyntheticDownCheck(after: 0.03)
+            scheduleSyntheticDownCheck(after: Self.rightOptionComposerFocusDelay)
             return nil
         case .passthrough:
             _ = gesture.handle(.controlUp)

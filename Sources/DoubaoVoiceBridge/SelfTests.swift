@@ -274,6 +274,29 @@ enum SelfTests {
 
         do {
             check(
+                TranscriptSettlePolicy.timeoutDecision(elapsed: 8.1),
+                .continueWaiting,
+                "soft transcript timeout keeps polling"
+            )
+            check(
+                TranscriptSettlePolicy.isReady(
+                    textIsEmpty: false,
+                    hasMarkedText: false,
+                    elapsedAfterRelease: 8.1,
+                    stableFor: 0.35
+                ),
+                true,
+                "late unmarked transcript settles after soft timeout"
+            )
+            check(
+                TranscriptSettlePolicy.timeoutDecision(elapsed: 30.0),
+                .timeout,
+                "hard transcript timeout fires at thirty seconds"
+            )
+        }
+
+        do {
+            check(
                 TranscriptSettlePolicy.isReady(
                     textIsEmpty: true,
                     hasMarkedText: false,

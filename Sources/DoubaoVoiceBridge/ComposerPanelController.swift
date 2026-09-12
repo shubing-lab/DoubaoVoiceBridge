@@ -66,6 +66,14 @@ enum TranscriptSettlePolicy {
     static let minimumElapsedAfterRelease: TimeInterval = 0.45
     static let requiredStableDuration: TimeInterval = 0.35
     static let pollingInterval: TimeInterval = 0.05
+    static let softTimeout: TimeInterval = 8.0
+    static let hardTimeout: TimeInterval = 30.0
+
+    enum TimeoutDecision: Equatable { case continueWaiting, timeout }
+
+    static func timeoutDecision(elapsed: TimeInterval) -> TimeoutDecision {
+        elapsed >= hardTimeout ? .timeout : .continueWaiting
+    }
 
     static func isReady(
         textIsEmpty: Bool,
@@ -90,6 +98,8 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
     private let scrollView = NSScrollView()
     private let statusLabel = NSTextField(labelWithString: "")
     private let targetLabel = NSTextField(labelWithString: "")
+    private let copyButton = NSButton(title: "复制文字", target: nil, action: nil)
+    private let syncButton = NSButton(title: "同步到远端", target: nil, action: nil)
     private let logger = Logger(subsystem: "com.lyp.DoubaoVoiceBridge", category: "composer")
     private var settleWorkItem: DispatchWorkItem?
     private var settleStartedAt: Date?
@@ -102,7 +112,7 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
 
     init() {
         let panel = DictationPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 570, height: 176),
+            contentRect: NSRect(x: 0, y: 0, width: 570, height: 220),
             styleMask: [.titled, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -134,6 +144,8 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         isWaitingForFinalTranscript = false
         acceptsTranscriptUpdates = true
         textView.isEditable = true
+        copyButton.isEnabled = true
+        syncButton.isEnabled = true
         lastTextChangeAt = Date()
         targetLabel.stringValue = targetDescription
         statusLabel.stringValue = "正在启动豆包语音输入法…\(instruction)"
@@ -167,6 +179,8 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         statusLabel.stringValue = "识别完成，正在同步到 Mac mini…"
         statusLabel.textColor = .secondaryLabelColor
         textView.isEditable = false
+        copyButton.isEnabled = false
+        syncButton.isEnabled = false
         window?.makeFirstResponder(nil)
     }
 
@@ -177,6 +191,8 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         statusLabel.stringValue = message
         statusLabel.textColor = .systemRed
         textView.isEditable = true
+        copyButton.isEnabled = true
+        syncButton.isEnabled = true
         window?.makeKeyAndOrderFront(nil)
         window?.makeFirstResponder(textView)
     }
@@ -260,10 +276,19 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         scrollView.borderType = .bezelBorder
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
+        copyButton.translatesAutoresizingMaskIntoConstraints = false
+        syncButton.translatesAutoresizingMaskIntoConstraints = false
+        copyButton.target = self
+        copyButton.action = #selector(copyCurrentText)
+        syncButton.target = self
+        syncButton.action = #selector(syncCurrentText)
+
         content.addSubview(icon)
         content.addSubview(targetLabel)
         content.addSubview(statusLabel)
         content.addSubview(scrollView)
+        content.addSubview(copyButton)
+        content.addSubview(syncButton)
 
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
@@ -282,7 +307,13 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
             scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
             scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
             scrollView.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 10),
-            scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16)
+            scrollView.bottomAnchor.constraint(equalTo: copyButton.topAnchor, constant: -10),
+            copyButton.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
+            copyButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
+            syncButton.leadingAnchor.constraint(equalTo: copyButton.trailingAnchor, constant: 10),
+            syncButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
+            syncButton.centerYAnchor.constraint(equalTo: copyButton.centerYAnchor),
+            syncButton.widthAnchor.constraint(equalTo: copyButton.widthAnchor)
         ])
     }
 
@@ -344,21 +375,17 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
             return
         }
 
-        if elapsed >= 8.0 {
-            if !text.isEmpty,
-               !textView.hasMarkedText(),
-               stableFor >= TranscriptSettlePolicy.requiredStableDuration {
-                let bucket = PrivacySafeTextMetrics.lengthBucket(text.utf16.count)
-                logger.notice(
-                    "Transcript settled at deadline session=\(self.shortSessionID, privacy: .public) lengthBucket=\(bucket, privacy: .public)"
-                )
-                onCommit?(text)
-            } else {
+        if elapsed >= TranscriptSettlePolicy.softTimeout {
+            if TranscriptSettlePolicy.timeoutDecision(elapsed: elapsed) == .timeout {
                 let bucket = PrivacySafeTextMetrics.lengthBucket(text.utf16.count)
                 logger.error(
                     "Transcript timeout session=\(self.shortSessionID, privacy: .public) lengthBucket=\(bucket, privacy: .public) marked=\(self.textView.hasMarkedText(), privacy: .public)"
                 )
                 onTranscriptTimeout?()
+            } else {
+                statusLabel.stringValue = "识别仍在完成，可等待或使用下方按钮"
+                statusLabel.textColor = .secondaryLabelColor
+                scheduleSettleCheck(for: expectedSessionID)
             }
             return
         }
@@ -369,6 +396,25 @@ final class ComposerPanelController: NSWindowController, NSTextViewDelegate {
         settleWorkItem?.cancel()
         settleWorkItem = nil
         settleStartedAt = nil
+    }
+
+    @objc private func copyCurrentText() {
+        let text = textView.string
+        guard !text.isEmpty else {
+            showError("没有可复制的文字")
+            return
+        }
+        NSPasteboard.general.clearContents()
+        guard NSPasteboard.general.setString(text, forType: .string) else {
+            showError("无法写入系统剪贴板")
+            return
+        }
+        statusLabel.stringValue = "已复制到剪贴板"
+        statusLabel.textColor = .secondaryLabelColor
+    }
+
+    @objc private func syncCurrentText() {
+        commitCurrentText()
     }
 
     private var shortSessionID: String {
