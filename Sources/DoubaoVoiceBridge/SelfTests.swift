@@ -13,6 +13,12 @@ enum SelfTests {
         }
 
         do {
+            check(DeliveryFocusSettlePolicy.decision(elapsed: 0.0), .waiting, "newly acquired focus waits to settle")
+            check(DeliveryFocusSettlePolicy.decision(elapsed: 0.44), .waiting, "focus settle window remains active")
+            check(DeliveryFocusSettlePolicy.decision(elapsed: 0.45), .ready, "focus settles after 0.45 seconds")
+        }
+
+        do {
             check(DeliveryFocusPolicy.decision(frontmostPID: 100, targetPID: 100, bridgePID: 200, elapsed: 0.1), .ready, "target frontmost is ready")
             check(DeliveryFocusPolicy.decision(frontmostPID: 200, targetPID: 100, bridgePID: 200, elapsed: 0.5), .retryActivation, "bridge frontmost retries activation")
             check(DeliveryFocusPolicy.decision(frontmostPID: nil, targetPID: 100, bridgePID: 200, elapsed: 0.5), .retryActivation, "unknown frontmost retries activation")

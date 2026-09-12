@@ -83,6 +83,8 @@ final class UURemoteDelivery {
         logger.notice("Original UU window activation requested; polling focus before paste")
         var didFinish = false
         var didLogRetry = false
+        var focusAcquiredAt: Date?
+        var didLogFocusWaiting = false
         func finish(_ result: Result<Void, Error>) {
             guard !didFinish else { return }
             didFinish = true
@@ -111,7 +113,24 @@ final class UURemoteDelivery {
             )
             switch decision {
             case .ready:
-                self.logger.notice("UU delivery focus ready bundle=\(frontmost?.bundleIdentifier ?? "unknown", privacy: .public)")
+                let now = Date()
+                if focusAcquiredAt == nil {
+                    focusAcquiredAt = now
+                    didLogFocusWaiting = false
+                    self.logger.notice("UU delivery focus acquired; waiting for settle window")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: checkFocus)
+                    return
+                }
+                let focusElapsed = now.timeIntervalSince(focusAcquiredAt ?? now)
+                guard DeliveryFocusSettlePolicy.decision(elapsed: focusElapsed) == .ready else {
+                    if !didLogFocusWaiting {
+                        self.logger.notice("UU delivery focus waiting to settle elapsed=\(focusElapsed, privacy: .public)")
+                        didLogFocusWaiting = true
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: checkFocus)
+                    return
+                }
+                self.logger.notice("UU delivery focus settled; posting Command-V")
                 ClipboardKeyboardPaster.postCommandV { result in
                     switch result {
                     case .success: self.logger.notice("Complete Command-V key sequence posted to UU"); finish(.success(()))
@@ -119,6 +138,7 @@ final class UURemoteDelivery {
                     }
                 }
             case .retryActivation:
+                focusAcquiredAt = nil
                 if !didLogRetry { self.logger.notice("UU focus is bridge or unavailable; retrying activation"); didLogRetry = true }
                 target.activateOriginalWindow()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: checkFocus)
@@ -151,6 +171,16 @@ enum DeliveryFocusPolicy {
         if frontmostPID == targetPID { return .ready }
         if elapsed < retryDeadline && (frontmostPID == nil || frontmostPID == bridgePID) { return .retryActivation }
         return .targetChanged
+    }
+}
+
+enum DeliveryFocusSettleDecision: Equatable { case waiting, ready }
+
+enum DeliveryFocusSettlePolicy {
+    static let settleDuration: TimeInterval = 0.45
+
+    static func decision(elapsed: TimeInterval) -> DeliveryFocusSettleDecision {
+        elapsed >= settleDuration ? .ready : .waiting
     }
 }
 
