@@ -56,6 +56,27 @@ enum PhysicalModifierTransition: Equatable {
     case released
 }
 
+enum RightOptionFallbackAction: Equatable { case begin, ignoreInitialRelease, finish, ignore }
+
+struct RightOptionFallbackState: Equatable {
+    private(set) var isActive = false
+    private var releaseCount = 0
+
+    mutating func observe(_ isDown: Bool) -> RightOptionFallbackAction {
+        if isDown {
+            guard !isActive else { return .ignore }
+            isActive = true
+            releaseCount = 0
+            return .begin
+        }
+        guard isActive else { return .ignore }
+        releaseCount += 1
+        if releaseCount == 1 { return .ignoreInitialRelease }
+        isActive = false
+        return .finish
+    }
+}
+
 final class ControlHoldMonitor {
     static let syntheticEventMarker: Int64 = 0x4456_4252
     private static let rightOptionComposerFocusDelay: TimeInterval = 0.12
@@ -89,6 +110,7 @@ final class ControlHoldMonitor {
     private var physicalLeftControlIsDown = false
     private var physicalRightControlIsDown = false
     private var physicalRightOptionState = PhysicalModifierState()
+    private var rightOptionFallbackState = RightOptionFallbackState()
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var hidManager: IOHIDManager?
@@ -206,6 +228,9 @@ final class ControlHoldMonitor {
             return Unmanaged.passUnretained(event)
         }
         if type == .flagsChanged, keyCode == Self.rightOptionKeyCode {
+            if rightOptionFallbackState.isActive {
+                return Unmanaged.passUnretained(event)
+            }
             // The aggregate Option flag can remain set by left Option after
             // right Option is released. Query the individual physical key;
             // a delayed callback is still a no-op if IOHID saw the edge first.
@@ -294,16 +319,40 @@ final class ControlHoldMonitor {
         let physicalState = IOHIDValueGetIntegerValue(value) != 0
         let transition = physicalRightOptionState.observe(physicalState)
         guard transition != .unchanged else { return }
-        guard let source = CGEventSource(stateID: .hidSystemState),
-              let event = CGEvent(source: source) else {
-            logger.error("Unable to create right Option HID fallback event")
+        switch rightOptionFallbackState.observe(physicalState) {
+        case .begin:
+            beginFallbackRightOption()
+        case .ignoreInitialRelease:
+            logger.notice("IOHID right Option initial release left to Doubao")
+        case .finish:
+            logger.notice("IOHID right Option second release finalizing without synthetic stop")
+            onRelease()
+            resetGesture(notifyCancel: false)
+        case .ignore:
+            break
+        }
+    }
+
+    private func beginFallbackRightOption() {
+        guard case .idle = gesture.phase,
+              let target = targetProvider() else {
+            logger.notice("IOHID right Option fallback passed through because UU is not eligible")
+            rightOptionFallbackState = RightOptionFallbackState()
             return
         }
-        event.type = .flagsChanged
-        event.setIntegerValueField(.keyboardEventKeycode, value: Self.rightOptionKeyCode)
-        event.flags = CGEventSource.flagsState(.hidSystemState)
-        logger.notice("Physical right Option edge recovered by IOHID (down=\(physicalState, privacy: .public))")
-        _ = handleRightOption(isDown: physicalState, event: event)
+        let conflictingFlags: CGEventFlags = [.maskShift, .maskControl, .maskCommand, .maskSecondaryFn]
+        guard CGEventSource.flagsState(.hidSystemState).intersection(conflictingFlags).isEmpty else {
+            rightOptionFallbackState = RightOptionFallbackState()
+            return
+        }
+        self.target = target
+        trigger = .rightOptionToggle
+        _ = gesture.handle(.controlDown(targetAvailable: true))
+        _ = gesture.handle(.thresholdReached)
+        target.captureFocusedWindow()
+        logger.notice("IOHID right Option fallback began dictation without synthetic start")
+        onBegin(target, .rightOptionToggle)
+        optionVoiceStarted = true
     }
 
     private func handleLeftControl(isDown: Bool, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -549,6 +598,7 @@ final class ControlHoldMonitor {
         syntheticRoute = nil
         syntheticTrigger = nil
         trigger = nil
+        rightOptionFallbackState = RightOptionFallbackState()
         optionVoiceStarted = false
         localFocusDeadline = nil
         releaseRequestedBeforeSyntheticDown = false

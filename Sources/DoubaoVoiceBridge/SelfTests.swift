@@ -60,6 +60,14 @@ enum SelfTests {
         }
 
         do {
+            var fallback = RightOptionFallbackState()
+            check(fallback.observe(true), .begin, "fallback first press begins without synthetic start")
+            check(fallback.observe(false), .ignoreInitialRelease, "fallback first release keeps dictation active")
+            check(fallback.observe(true), .ignore, "fallback second press leaves physical path untouched")
+            check(fallback.observe(false), .finish, "fallback second release finalizes without synthetic stop")
+        }
+
+        do {
             var state = HoldGestureState()
             check(state.handle(.controlDown(targetAvailable: true)), [.suppress, .scheduleThreshold], "long hold down")
             check(state.phase, .pending, "long hold pending")
